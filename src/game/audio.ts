@@ -1,4 +1,5 @@
 import { loadMutedPref, saveMutedPref } from './engine';
+import { getStorageItem, setStorageItem } from './storage';
 import { AudioSettingsState } from './types';
 
 export const AUDIO_STORAGE_KEY = 'neon_block_audio_v1';
@@ -37,7 +38,7 @@ export function validateAudioSettings(
 export function loadAudioSettings(): AudioSettingsState {
   const legacyMuted = loadMutedPref();
   try {
-    const rawStr = window.localStorage.getItem(AUDIO_STORAGE_KEY);
+    const rawStr = getStorageItem(AUDIO_STORAGE_KEY);
     if (!rawStr) {
       const initial: AudioSettingsState = {
         version: AUDIO_SCHEMA_VERSION,
@@ -58,13 +59,11 @@ export function loadAudioSettings(): AudioSettingsState {
     }
     return validated;
   } catch {
-    const fallback: AudioSettingsState = {
+    return {
       version: AUDIO_SCHEMA_VERSION,
       sfxVolume: DEFAULT_SFX_VOLUME,
       muted: legacyMuted,
     };
-    saveAudioSettings(fallback);
-    return fallback;
   }
 }
 
@@ -72,10 +71,15 @@ export function saveAudioSettings(settings: AudioSettingsState): void {
   const clean = validateAudioSettings(settings, settings.muted);
   saveMutedPref(clean.muted);
   try {
-    window.localStorage.setItem(AUDIO_STORAGE_KEY, JSON.stringify(clean));
+    setStorageItem(AUDIO_STORAGE_KEY, JSON.stringify(clean));
   } catch {
     // Ignore storage quota / private mode errors
   }
+}
+
+interface ActiveAudioSource {
+  osc: OscillatorNode;
+  gain?: GainNode;
 }
 
 class NeonAudioEngine {
@@ -84,9 +88,12 @@ class NeonAudioEngine {
   private muted = false;
   private sfxVolume = DEFAULT_SFX_VOLUME; // 0..100
   private lastPreviewAt = 0;
+  private backgroundSuspended = false;
+  private awaitingUserGesture = false;
+  private activeSources = new Set<ActiveAudioSource>();
 
   private computeTargetGain(): number {
-    if (this.muted || this.sfxVolume <= 0) return 0;
+    if (this.muted || this.sfxVolume <= 0 || this.backgroundSuspended) return 0;
     // Perceptually balanced curve so 70% feels comfortable and 100% stays crisp without clipping
     const normalized = this.sfxVolume / 100;
     return Number((normalized * normalized * 0.45 + normalized * 0.55).toFixed(4));
@@ -100,8 +107,18 @@ class NeonAudioEngine {
 
     try {
       const currentVal = Number.isFinite(param.value) ? param.value : target;
-      if (typeof (param as AudioParam & { cancelAndHoldAtTime?: (t: number) => AudioParam }).cancelAndHoldAtTime === 'function') {
-        (param as AudioParam & { cancelAndHoldAtTime: (t: number) => AudioParam }).cancelAndHoldAtTime(now);
+      if (
+        typeof (
+          param as AudioParam & {
+            cancelAndHoldAtTime?: (t: number) => AudioParam;
+          }
+        ).cancelAndHoldAtTime === 'function'
+      ) {
+        (
+          param as AudioParam & {
+            cancelAndHoldAtTime: (t: number) => AudioParam;
+          }
+        ).cancelAndHoldAtTime(now);
       } else {
         param.cancelScheduledValues(now);
         param.setValueAtTime(currentVal, now);
@@ -115,6 +132,60 @@ class NeonAudioEngine {
     } catch {
       param.value = target;
     }
+  }
+
+  private registerSource(osc: OscillatorNode, gain?: GainNode): void {
+    const entry: ActiveAudioSource = { osc, gain };
+    this.activeSources.add(entry);
+    osc.onended = () => {
+      this.activeSources.delete(entry);
+      try {
+        osc.disconnect();
+      } catch {
+        // Ignore disconnect errors on already-cleaned nodes
+      }
+      if (gain) {
+        try {
+          gain.disconnect();
+        } catch {
+          // Ignore disconnect errors
+        }
+      }
+    };
+  }
+
+  private stopAllActiveAudio(): void {
+    if (this.activeSources.size === 0) return;
+    const now = this.ctx?.currentTime ?? 0;
+    for (const entry of Array.from(this.activeSources)) {
+      if (entry.gain) {
+        try {
+          entry.gain.gain.cancelScheduledValues(now);
+          entry.gain.gain.setValueAtTime(0, now);
+        } catch {
+          // Ignore gain reset errors
+        }
+      }
+      try {
+        entry.osc.onended = null;
+        entry.osc.stop();
+      } catch {
+        // Ignore already-stopped oscillators
+      }
+      try {
+        entry.osc.disconnect();
+      } catch {
+        // Ignore disconnect errors
+      }
+      if (entry.gain) {
+        try {
+          entry.gain.disconnect();
+        } catch {
+          // Ignore disconnect errors
+        }
+      }
+    }
+    this.activeSources.clear();
   }
 
   setMuted(muted: boolean): void {
@@ -139,6 +210,56 @@ class NeonAudioEngine {
     return this.computeTargetGain();
   }
 
+  isBackgroundSuspended(): boolean {
+    return this.backgroundSuspended;
+  }
+
+  isAwaitingUserGesture(): boolean {
+    return this.awaitingUserGesture;
+  }
+
+  suspendForBackground(): void {
+    this.backgroundSuspended = true;
+    this.awaitingUserGesture = true;
+    this.stopAllActiveAudio();
+
+    if (this.ctx) {
+      if (this.sfxGain) {
+        try {
+          const now = this.ctx.currentTime;
+          this.sfxGain.gain.cancelScheduledValues(now);
+          this.sfxGain.gain.setValueAtTime(0, now);
+        } catch {
+          // Ignore gain errors
+        }
+      }
+      if (
+        this.ctx.state !== 'closed' &&
+        typeof this.ctx.suspend === 'function'
+      ) {
+        try {
+          const res = this.ctx.suspend();
+          if (res && typeof res.catch === 'function') {
+            res.catch(() => {});
+          }
+        } catch {
+          // Ignore AudioContext suspend errors
+        }
+      }
+    }
+  }
+
+  /**
+   * Marks that the application returned to the foreground without automatically
+   * resuming AudioContext; actual audio playback waits for a valid user gesture via unlock().
+   */
+  markForegroundReturned(): void {
+    this.backgroundSuspended = false;
+    if (this.ctx) {
+      this.awaitingUserGesture = true;
+    }
+  }
+
   configure(settings: Pick<AudioSettingsState, 'sfxVolume' | 'muted'>): void {
     this.sfxVolume = clampSfxVolume(settings.sfxVolume, DEFAULT_SFX_VOLUME);
     this.muted = Boolean(settings.muted);
@@ -147,12 +268,16 @@ class NeonAudioEngine {
 
   /**
    * Ensures the AudioContext and shared SFX GainNode exist.
-   * All sound effects connect to sfxGain (leaving room for any independent music bus).
+   * Refuses to play or auto-resume while background-suspended or awaiting a user gesture.
    */
   private ensureSfxBus(allowWhenSilent = false): {
     ctx: AudioContext;
     bus: GainNode;
   } | null {
+    if (this.backgroundSuspended || this.awaitingUserGesture) return null;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      return null;
+    }
     if (!allowWhenSilent && (this.muted || this.sfxVolume <= 0)) return null;
     if (typeof window === 'undefined') return null;
 
@@ -172,14 +297,29 @@ class NeonAudioEngine {
     }
 
     if (this.ctx.state === 'suspended') {
-      this.ctx.resume().catch(() => {});
+      try {
+        const res = this.ctx.resume();
+        if (res && typeof res.catch === 'function') {
+          res.catch(() => {});
+        }
+      } catch {
+        // Ignore resume errors
+      }
     }
 
     return { ctx: this.ctx, bus: this.sfxGain };
   }
 
   unlock(): void {
-    this.ensureSfxBus(true);
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      return;
+    }
+    this.backgroundSuspended = false;
+    this.awaitingUserGesture = false;
+    const bus = this.ensureSfxBus(true);
+    if (bus) {
+      this.applyGainSmoothly(true);
+    }
   }
 
   playVolumePreview(force = false): void {
@@ -206,6 +346,7 @@ class NeonAudioEngine {
 
       osc.connect(gain);
       gain.connect(bus);
+      this.registerSource(osc, gain);
       osc.start(t);
       osc.stop(t + 0.15);
     });
@@ -228,6 +369,7 @@ class NeonAudioEngine {
 
     osc.connect(gain);
     gain.connect(bus);
+    this.registerSource(osc, gain);
     osc.start(now);
     osc.stop(now + 0.032);
   }
@@ -249,6 +391,7 @@ class NeonAudioEngine {
 
     osc.connect(gain);
     gain.connect(bus);
+    this.registerSource(osc, gain);
     osc.start(now);
     osc.stop(now + 0.07);
   }
@@ -269,6 +412,7 @@ class NeonAudioEngine {
     subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
     sub.connect(subGain);
     subGain.connect(bus);
+    this.registerSource(sub, subGain);
     sub.start(now);
     sub.stop(now + 0.105);
 
@@ -282,6 +426,7 @@ class NeonAudioEngine {
     topGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
     top.connect(topGain);
     topGain.connect(bus);
+    this.registerSource(top, topGain);
     top.start(now);
     top.stop(now + 0.055);
   }
@@ -309,6 +454,7 @@ class NeonAudioEngine {
     osc.connect(filter);
     filter.connect(gain);
     gain.connect(bus);
+    this.registerSource(osc, gain);
     osc.start(now);
     osc.stop(now + 0.125);
   }
@@ -345,6 +491,8 @@ class NeonAudioEngine {
     osc2.connect(gain);
     gain.connect(bus);
 
+    this.registerSource(osc1, gain);
+    this.registerSource(osc2);
     osc1.start(now);
     osc2.start(now);
     osc1.stop(now + 0.25);
@@ -372,6 +520,7 @@ class NeonAudioEngine {
 
       osc.connect(gain);
       gain.connect(bus);
+      this.registerSource(osc, gain);
       osc.start(t);
       osc.stop(t + 0.23);
     });
@@ -393,6 +542,7 @@ class NeonAudioEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, t + 0.11);
       osc.connect(gain);
       gain.connect(bus);
+      this.registerSource(osc, gain);
       osc.start(t);
       osc.stop(t + 0.12);
     });
@@ -414,6 +564,7 @@ class NeonAudioEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
       osc.connect(gain);
       gain.connect(bus);
+      this.registerSource(osc, gain);
       osc.start(t);
       osc.stop(t + 0.3);
     });
@@ -436,6 +587,7 @@ class NeonAudioEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
       osc.connect(gain);
       gain.connect(bus);
+      this.registerSource(osc, gain);
       osc.start(t);
       osc.stop(t + 0.23);
     });
@@ -457,6 +609,7 @@ class NeonAudioEngine {
     popGain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
     pop.connect(popGain);
     popGain.connect(bus);
+    this.registerSource(pop, popGain);
     pop.start(now);
     pop.stop(now + 0.16);
 
@@ -471,6 +624,7 @@ class NeonAudioEngine {
       sGain.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
       sparkle.connect(sGain);
       sGain.connect(bus);
+      this.registerSource(sparkle, sGain);
       sparkle.start(t);
       sparkle.stop(t + 0.19);
     });
@@ -494,6 +648,7 @@ class NeonAudioEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, t + 0.34);
       osc.connect(gain);
       gain.connect(bus);
+      this.registerSource(osc, gain);
       osc.start(t);
       osc.stop(t + 0.36);
     });
@@ -517,6 +672,7 @@ class NeonAudioEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
       osc.connect(gain);
       gain.connect(bus);
+      this.registerSource(osc, gain);
       osc.start(t);
       osc.stop(t + 0.32);
     });
@@ -539,6 +695,7 @@ class NeonAudioEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, t + 0.32);
       osc.connect(gain);
       gain.connect(bus);
+      this.registerSource(osc, gain);
       osc.start(t);
       osc.stop(t + 0.34);
     });
@@ -563,6 +720,7 @@ class NeonAudioEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, t + 0.36);
       osc.connect(gain);
       gain.connect(bus);
+      this.registerSource(osc, gain);
       osc.start(t);
       osc.stop(t + 0.38);
     });

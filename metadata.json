@@ -2,5 +2,5 @@
   "name": "NEON BLOCK",
   "description": "An offline neon arcade puzzle combining polyomino block placement with cascading number tile merging.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }

@@ -102,7 +102,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
     backBtnRef.current?.focus();
   }, []);
 
-  // Dismiss reward celebration dialog on Escape before returning from Dashboard
+  // Dismiss reward celebration dialog on Escape or Android hardware back before returning from Dashboard
   useEffect(() => {
     if (!claimCelebration || isHelpOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -112,8 +112,16 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
         setClaimCelebration(null);
       }
     };
+    const onNativeBack = (e: Event) => {
+      e.preventDefault();
+      setClaimCelebration(null);
+    };
     window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
+    window.addEventListener('neonblock:backbutton', onNativeBack);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('neonblock:backbutton', onNativeBack);
+    };
   }, [claimCelebration, isHelpOpen]);
 
   const levelInfo = computeLevelFromTotalXp(profile.xp);
