@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">NEON BLOCK</string>
+    <string name="title_activity_main">NEON BLOCK</string>
+    <string name="package_name">com.mrinmoy.neonblock</string>
+    <string name="custom_url_scheme">com.mrinmoy.neonblock</string>
+</resources>

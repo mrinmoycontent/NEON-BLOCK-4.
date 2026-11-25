@@ -1,3 +1,4 @@
+import { getStorageItem, setStorageItem } from './storage';
 import {
   DailyChallengeConfig,
   DailyDayRecord,
@@ -203,6 +204,41 @@ export function evaluateDailyProgress(
   };
 }
 
+function sanitizeDailyRecords(
+  rawRecords: unknown
+): Record<string, DailyDayRecord> {
+  if (!rawRecords || typeof rawRecords !== 'object') return {};
+  const clean: Record<string, DailyDayRecord> = {};
+  for (const [key, val] of Object.entries(
+    rawRecords as Record<string, unknown>
+  )) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key) || !val || typeof val !== 'object') {
+      continue;
+    }
+    const rec = val as Record<string, unknown>;
+    clean[key] = {
+      dateKey: typeof rec.dateKey === 'string' ? rec.dateKey : key,
+      completed: Boolean(rec.completed),
+      rewardClaimed: Boolean(rec.rewardClaimed),
+      bestProgress:
+        typeof rec.bestProgress === 'number' && Number.isFinite(rec.bestProgress)
+          ? Math.max(0, Math.floor(rec.bestProgress))
+          : 0,
+      bestScore:
+        typeof rec.bestScore === 'number' && Number.isFinite(rec.bestScore)
+          ? Math.max(0, Math.floor(rec.bestScore))
+          : 0,
+      attempts:
+        typeof rec.attempts === 'number' && Number.isFinite(rec.attempts)
+          ? Math.max(0, Math.floor(rec.attempts))
+          : 0,
+      completedAt:
+        typeof rec.completedAt === 'string' ? rec.completedAt : undefined,
+    };
+  }
+  return clean;
+}
+
 export function loadDailySaveState(): DailySaveState {
   const empty: DailySaveState = {
     currentStreak: 0,
@@ -213,24 +249,31 @@ export function loadDailySaveState(): DailySaveState {
   };
 
   try {
-    const raw = window.localStorage.getItem(DAILY_STORAGE_KEY);
+    const raw = getStorageItem(DAILY_STORAGE_KEY);
     if (!raw) return empty;
     const parsed = JSON.parse(raw) as Partial<DailySaveState>;
+    if (!parsed || typeof parsed !== 'object') return empty;
     return {
       currentStreak:
-        typeof parsed.currentStreak === 'number' ? parsed.currentStreak : 0,
+        typeof parsed.currentStreak === 'number' &&
+        Number.isFinite(parsed.currentStreak)
+          ? Math.max(0, Math.floor(parsed.currentStreak))
+          : 0,
       longestStreak:
-        typeof parsed.longestStreak === 'number' ? parsed.longestStreak : 0,
+        typeof parsed.longestStreak === 'number' &&
+        Number.isFinite(parsed.longestStreak)
+          ? Math.max(0, Math.floor(parsed.longestStreak))
+          : 0,
       lastCompletedDate:
         typeof parsed.lastCompletedDate === 'string'
           ? parsed.lastCompletedDate
           : null,
       totalShards:
-        typeof parsed.totalShards === 'number' ? parsed.totalShards : 0,
-      records:
-        parsed.records && typeof parsed.records === 'object'
-          ? parsed.records
-          : {},
+        typeof parsed.totalShards === 'number' &&
+        Number.isFinite(parsed.totalShards)
+          ? Math.max(0, Math.floor(parsed.totalShards))
+          : 0,
+      records: sanitizeDailyRecords(parsed.records),
     };
   } catch {
     return empty;
@@ -239,7 +282,7 @@ export function loadDailySaveState(): DailySaveState {
 
 export function saveDailySaveState(state: DailySaveState): void {
   try {
-    window.localStorage.setItem(DAILY_STORAGE_KEY, JSON.stringify(state));
+    setStorageItem(DAILY_STORAGE_KEY, JSON.stringify(state));
   } catch {
     // Ignore storage errors
   }
@@ -378,7 +421,7 @@ export function updateDailyProgressAndReward(
 
 export function loadParticleIntensity(): ParticleIntensity {
   try {
-    const raw = window.localStorage.getItem(PARTICLE_INTENSITY_KEY);
+    const raw = getStorageItem(PARTICLE_INTENSITY_KEY);
     if (raw === 'LOW' || raw === 'MEDIUM' || raw === 'HIGH') {
       return raw;
     }
@@ -389,11 +432,7 @@ export function loadParticleIntensity(): ParticleIntensity {
 }
 
 export function saveParticleIntensity(intensity: ParticleIntensity): void {
-  try {
-    window.localStorage.setItem(PARTICLE_INTENSITY_KEY, intensity);
-  } catch {
-    // Ignore storage errors
-  }
+  setStorageItem(PARTICLE_INTENSITY_KEY, intensity);
 }
 
 export interface SevenDayStreakPoint {

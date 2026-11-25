@@ -1,3 +1,4 @@
+import { getStorageItem, setStorageItem } from './storage';
 import {
   BlockPiece,
   BoardTile,
@@ -671,7 +672,7 @@ const MUTE_KEY = 'neon_block_muted_v1';
 
 export function loadBestScore(): number {
   try {
-    const raw = window.localStorage.getItem(BEST_SCORE_KEY);
+    const raw = getStorageItem(BEST_SCORE_KEY);
     const parsed = raw ? parseInt(raw, 10) : 0;
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
   } catch {
@@ -680,25 +681,18 @@ export function loadBestScore(): number {
 }
 
 export function saveBestScore(score: number): void {
-  try {
-    window.localStorage.setItem(BEST_SCORE_KEY, String(Math.floor(score)));
-  } catch {
-    // Ignore storage quota or private mode errors
-  }
+  if (!Number.isFinite(score) || score < 0) return;
+  setStorageItem(BEST_SCORE_KEY, String(Math.floor(score)));
 }
 
 export function loadMutedPref(): boolean {
   try {
-    return window.localStorage.getItem(MUTE_KEY) === 'true';
+    return getStorageItem(MUTE_KEY) === 'true';
   } catch {
     return false;
   }
 }
 
 export function saveMutedPref(muted: boolean): void {
-  try {
-    window.localStorage.setItem(MUTE_KEY, muted ? 'true' : 'false');
-  } catch {
-    // Ignore storage errors
-  }
+  setStorageItem(MUTE_KEY, muted ? 'true' : 'false');
 }

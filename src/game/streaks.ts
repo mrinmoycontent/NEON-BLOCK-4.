@@ -4,6 +4,7 @@ import {
   getLocalDateKey,
   offsetLocalDateKey,
 } from './daily';
+import { getStorageItem, setStorageItem } from './storage';
 import {
   CalendarDayStatus,
   DailySaveState,
@@ -238,21 +239,22 @@ export function loadStreakState(
   profile?: PlayerProfileState
 ): StreakSaveState {
   try {
-    const rawStr = window.localStorage.getItem(STREAK_STORAGE_KEY);
+    const rawStr = getStorageItem(STREAK_STORAGE_KEY);
     const parsed = rawStr ? JSON.parse(rawStr) : null;
     const hydrated = validateAndHydrateStreakState(parsed, dailyState, profile);
-    saveStreakState(hydrated);
+    if (rawStr === null || !parsed || typeof parsed !== 'object') {
+      saveStreakState(hydrated);
+    }
     return hydrated;
   } catch {
-    const fallback = validateAndHydrateStreakState(null, dailyState, profile);
-    saveStreakState(fallback);
-    return fallback;
+    // Corrupted JSON: hydrate cleanly from dailyState/profile without erasing storage unless missing
+    return validateAndHydrateStreakState(null, dailyState, profile);
   }
 }
 
 export function saveStreakState(state: StreakSaveState): void {
   try {
-    window.localStorage.setItem(STREAK_STORAGE_KEY, JSON.stringify(state));
+    setStorageItem(STREAK_STORAGE_KEY, JSON.stringify(state));
   } catch {
     // Ignore storage quota / private mode errors
   }

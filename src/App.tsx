@@ -27,6 +27,7 @@ import {
   neonAudio,
   saveAudioSettings,
 } from './game/audio';
+import { registerAppLifecycleBridge } from './game/capacitorBridge';
 import {
   evaluateDailyProgress,
   generateDailyChallenge,
@@ -102,8 +103,15 @@ export default function App() {
   const [gameMode, setGameMode] = useState<GameMode>('CLASSIC');
   const [showHelp, setShowHelp] = useState(false);
   const [showAudioSettings, setShowAudioSettings] = useState(false);
+  const [isAppBackgrounded, setIsAppBackgrounded] = useState(false);
   const [streakCelebration, setStreakCelebration] =
     useState<StreakRecordOutcome | null>(null);
+  const showHelpRef = useRef(showHelp);
+  showHelpRef.current = showHelp;
+  const showAudioSettingsRef = useRef(showAudioSettings);
+  showAudioSettingsRef.current = showAudioSettings;
+  const streakCelebrationRef = useRef(streakCelebration);
+  streakCelebrationRef.current = streakCelebration;
 
   const [audioSettings, setAudioSettings] = useState<AudioSettingsState>(() => {
     const loaded = loadAudioSettings();
@@ -805,6 +813,58 @@ export default function App() {
     toggleMute,
   ]);
 
+  // Unified Web + Capacitor Android background/foreground lifecycle & hardware Back button
+  useEffect(() => {
+    return registerAppLifecycleBridge({
+      onEnterBackground: () => {
+        setIsAppBackgrounded(true);
+        neonAudio.suspendForBackground();
+        setNavState((prev) =>
+          prev.status === 'PLAYING' ? togglePauseView(prev) : prev
+        );
+      },
+      onEnterForeground: () => {
+        setIsAppBackgrounded(false);
+        neonAudio.markForegroundReturned();
+        const current = getLocalDateKey();
+        if (current !== todayKeyRef.current) {
+          setTodayKey(current);
+        }
+      },
+      onHardwareBackButton: () => {
+        if (streakCelebrationRef.current) {
+          closeStreakCelebration();
+          return true;
+        }
+        if (showAudioSettingsRef.current) {
+          closeAudioSettings();
+          return true;
+        }
+        if (showHelpRef.current) {
+          closeHelp();
+          return true;
+        }
+        const subModalEvent = new CustomEvent('neonblock:backbutton', {
+          cancelable: true,
+        });
+        window.dispatchEvent(subModalEvent);
+        if (subModalEvent.defaultPrevented) {
+          return true;
+        }
+        if (navStateRef.current.status !== 'TITLE_MENU') {
+          goBackToPreviousView();
+          return true;
+        }
+        return false;
+      },
+    });
+  }, [
+    closeAudioSettings,
+    closeHelp,
+    closeStreakCelebration,
+    goBackToPreviousView,
+  ]);
+
   // Allow D-pad navigation across HUD buttons and back to Canvas
   const handleHudButtonKeyDown = (
     e: React.KeyboardEvent<HTMLButtonElement>,
@@ -1215,6 +1275,7 @@ export default function App() {
         <NeonCanvas
           ref={canvasHandleRef}
           status={isAnyOverlayOpen && status === 'PLAYING' ? 'PAUSED' : status}
+          isBackgrounded={isAppBackgrounded}
           bestScore={bestScore}
           reducedMotion={reducedMotion}
           particleIntensity={particleIntensity}

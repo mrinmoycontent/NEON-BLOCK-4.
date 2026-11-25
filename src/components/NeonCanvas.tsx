@@ -61,6 +61,7 @@ export interface NeonCanvasHandle {
 
 interface NeonCanvasProps {
   status: GameStatus;
+  isBackgrounded?: boolean;
   bestScore: number;
   reducedMotion: boolean;
   particleIntensity: ParticleIntensity;
@@ -101,6 +102,7 @@ export const NeonCanvas = React.forwardRef<NeonCanvasHandle, NeonCanvasProps>(
   (
     {
       status,
+      isBackgrounded = false,
       bestScore,
       reducedMotion,
       particleIntensity,
@@ -123,8 +125,37 @@ export const NeonCanvas = React.forwardRef<NeonCanvasHandle, NeonCanvasProps>(
     const statusRef = useRef(status);
     statusRef.current = status;
 
+    const isBackgroundedRef = useRef(isBackgrounded);
+    isBackgroundedRef.current = isBackgrounded;
+
     const bestScoreRef = useRef(bestScore);
     bestScoreRef.current = bestScore;
+
+    const pendingTimersRef = useRef<Set<number>>(new Set());
+    const pendingGameOverRef = useRef<boolean>(false);
+    const syncLoopRef = useRef<() => void>(() => {});
+
+    const clearPendingTimers = () => {
+      for (const id of pendingTimersRef.current) {
+        window.clearTimeout(id);
+      }
+      pendingTimersRef.current.clear();
+    };
+
+    const scheduleTimer = (fn: () => void, delayMs: number): number => {
+      const id = window.setTimeout(() => {
+        pendingTimersRef.current.delete(id);
+        if (
+          isBackgroundedRef.current ||
+          (typeof document !== 'undefined' && document.visibilityState === 'hidden')
+        ) {
+          return;
+        }
+        fn();
+      }, delayMs);
+      pendingTimersRef.current.add(id);
+      return id;
+    };
 
     const reducedMotionRef = useRef(reducedMotion);
     reducedMotionRef.current = reducedMotion;
@@ -140,6 +171,9 @@ export const NeonCanvas = React.forwardRef<NeonCanvasHandle, NeonCanvasProps>(
 
     const onTurnResolvedRef = useRef(onTurnResolved);
     onTurnResolvedRef.current = onTurnResolved;
+
+    const onGameOverRef = useRef(onGameOver);
+    onGameOverRef.current = onGameOver;
 
     const simRef = useRef<SimState>({
       grid: createShowcaseGrid(),
@@ -246,15 +280,14 @@ export const NeonCanvas = React.forwardRef<NeonCanvasHandle, NeonCanvasProps>(
     };
 
     const launchFireworks = (count = 4): void => {
-      if (reducedMotionRef.current) return;
+      if (reducedMotionRef.current || isBackgroundedRef.current) return;
       const sim = simRef.current;
-      const layout = layoutRef.current;
       const colors = ['#22D3EE', '#60A5FA', '#C084FC', '#E879F9', '#67E8F9'];
       const actualCount = Math.max(2, Math.round(count * getIntensityScale()));
 
       for (let i = 0; i < actualCount; i++) {
         const delayMs = i * 150;
-        window.setTimeout(() => {
+        scheduleTimer(() => {
           const w = layoutRef.current.width;
           const h = layoutRef.current.height;
           const startX = w * (0.18 + Math.random() * 0.64);
@@ -317,6 +350,8 @@ export const NeonCanvas = React.forwardRef<NeonCanvasHandle, NeonCanvasProps>(
     };
 
     const startNewGame = (options?: StartGameOptions) => {
+      clearPendingTimers();
+      pendingGameOverRef.current = false;
       const sim = simRef.current;
       const daily = options?.dailyChallenge;
       const startingBonus = Math.max(0, Math.floor(options?.startingBonusPoints ?? 0));
@@ -701,20 +736,20 @@ export const NeonCanvas = React.forwardRef<NeonCanvasHandle, NeonCanvasProps>(
 
       if (res.mergeSteps.length > 0) {
         const lastMerge = res.mergeSteps[res.mergeSteps.length - 1];
-        setTimeout(() => {
+        scheduleTimer(() => {
           neonAudio.playMerge(res.maxComboDepth, lastMerge.newValue);
         }, 55);
       }
 
       if (res.lineClearStep) {
         const totalLines = res.lineClearStep.rows.length + res.lineClearStep.cols.length;
-        setTimeout(() => {
+        scheduleTimer(() => {
           neonAudio.playLineClear(totalLines);
         }, 85);
       }
 
       if (res.refilledTray && !res.isGameOver) {
-        setTimeout(() => {
+        scheduleTimer(() => {
           neonAudio.playNewTray();
         }, 150);
       }
@@ -769,54 +804,80 @@ export const NeonCanvas = React.forwardRef<NeonCanvasHandle, NeonCanvasProps>(
       onTurnResolvedRef.current?.(res);
 
       if (res.isGameOver) {
-        setTimeout(() => {
+        pendingGameOverRef.current = true;
+        scheduleTimer(() => {
+          pendingGameOverRef.current = false;
           neonAudio.playGameOver();
-          onGameOver({ ...sim.stats });
+          onGameOverRef.current({ ...sim.stats });
         }, 380);
       }
 
       return true;
     };
 
-    // Canvas resize & 60fps animation loop
+    // Canvas resize & lifecycle-aware 60fps animation loop
     useEffect(() => {
       const container = containerRef.current;
       const canvas = canvasRef.current;
       if (!container || !canvas) return;
 
-      const updateSize = () => {
-        const rect = container.getBoundingClientRect();
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
-        const w = Math.max(320, Math.floor(rect.width));
-        const h = Math.max(260, Math.floor(rect.height));
-
-        canvas.width = Math.floor(w * dpr);
-        canvas.height = Math.floor(h * dpr);
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
-
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        }
-
-        layoutRef.current = computeCanvasLayout(w, h);
-        if (simRef.current.motes.length === 0) {
-          simRef.current.motes = createAmbientMotes(26, w, h);
-        }
-      };
-
-      updateSize();
-      const ro = new ResizeObserver(updateSize);
-      ro.observe(container);
-
       let rafId = 0;
       let lastTime = performance.now();
 
+      const drawFrame = (shakeX = 0, shakeY = 0) => {
+        const sim = simRef.current;
+        const layout = layoutRef.current;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        renderNeonCanvas(ctx, layout, {
+          time: sim.time,
+          grid: sim.grid,
+          tray: sim.tray,
+          selectedSlot: statusRef.current === 'PLAYING' ? sim.selectedSlot : -1,
+          preview: statusRef.current === 'PLAYING' ? sim.preview : null,
+          drag: statusRef.current === 'PLAYING' ? sim.drag : null,
+          cursor:
+            statusRef.current === 'PLAYING'
+              ? sim.cursor
+              : { ...sim.cursor, visible: false },
+          particles: sim.particles,
+          fireworks: sim.fireworks,
+          shockwaves: sim.shockwaves,
+          beams: sim.beams,
+          floatingTexts: sim.floatingTexts,
+          mergeGhosts: sim.mergeGhosts,
+          motes: sim.motes,
+          shakeX,
+          shakeY,
+          isDimmed: statusRef.current !== 'PLAYING',
+          themeId: themeIdRef.current,
+        });
+      };
+
+      const isLoopFrozen = (): boolean => {
+        if (isBackgroundedRef.current) return true;
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          return true;
+        }
+        return statusRef.current === 'PAUSED';
+      };
+
+      const stopLoop = () => {
+        if (rafId !== 0) {
+          cancelAnimationFrame(rafId);
+          rafId = 0;
+        }
+      };
+
       const tick = (now: number) => {
+        if (isLoopFrozen()) {
+          rafId = 0;
+          return;
+        }
+
         const rawDt = (now - lastTime) / 1000;
         lastTime = now;
-        const dt = Math.min(rawDt, 0.05);
+        const dt = Math.min(Math.max(rawDt, 0), 0.05);
 
         const sim = simRef.current;
         const layout = layoutRef.current;
@@ -952,43 +1013,80 @@ export const NeonCanvas = React.forwardRef<NeonCanvasHandle, NeonCanvasProps>(
           shakeY = (Math.random() - 0.5) * 2 * mag;
         }
 
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          renderNeonCanvas(ctx, layout, {
-            time: sim.time,
-            grid: sim.grid,
-            tray: sim.tray,
-            selectedSlot: statusRef.current === 'PLAYING' ? sim.selectedSlot : -1,
-            preview: statusRef.current === 'PLAYING' ? sim.preview : null,
-            drag: statusRef.current === 'PLAYING' ? sim.drag : null,
-            cursor:
-              statusRef.current === 'PLAYING'
-                ? sim.cursor
-                : { ...sim.cursor, visible: false },
-            particles: sim.particles,
-            fireworks: sim.fireworks,
-            shockwaves: sim.shockwaves,
-            beams: sim.beams,
-            floatingTexts: sim.floatingTexts,
-            mergeGhosts: sim.mergeGhosts,
-            motes: sim.motes,
-            shakeX,
-            shakeY,
-            isDimmed: statusRef.current !== 'PLAYING',
-            themeId: themeIdRef.current,
-          });
-        }
-
+        drawFrame(shakeX, shakeY);
         rafId = requestAnimationFrame(tick);
       };
 
-      rafId = requestAnimationFrame(tick);
+      const syncLoop = () => {
+        if (isLoopFrozen()) {
+          stopLoop();
+          if (
+            !isBackgroundedRef.current &&
+            (typeof document === 'undefined' || document.visibilityState !== 'hidden')
+          ) {
+            drawFrame(0, 0);
+          }
+          return;
+        }
+        if (rafId === 0) {
+          lastTime = performance.now();
+          rafId = requestAnimationFrame(tick);
+        }
+      };
+
+      syncLoopRef.current = syncLoop;
+
+      const updateSize = () => {
+        const rect = container.getBoundingClientRect();
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const w = Math.max(320, Math.floor(rect.width));
+        const h = Math.max(260, Math.floor(rect.height));
+
+        canvas.width = Math.floor(w * dpr);
+        canvas.height = Math.floor(h * dpr);
+        canvas.style.width = `${w}px`;
+        canvas.style.height = `${h}px`;
+
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+
+        layoutRef.current = computeCanvasLayout(w, h);
+        if (simRef.current.motes.length === 0) {
+          simRef.current.motes = createAmbientMotes(26, w, h);
+        }
+        if (isLoopFrozen()) {
+          drawFrame(0, 0);
+        }
+      };
+
+      updateSize();
+      const ro = new ResizeObserver(updateSize);
+      ro.observe(container);
+
+      syncLoop();
 
       return () => {
-        cancelAnimationFrame(rafId);
+        stopLoop();
+        clearPendingTimers();
+        syncLoopRef.current = () => {};
         ro.disconnect();
       };
     }, []);
+
+    useEffect(() => {
+      if (isBackgrounded) {
+        clearPendingTimers();
+        simRef.current.drag = null;
+        simRef.current.pointerDownPos = null;
+        if (pendingGameOverRef.current) {
+          pendingGameOverRef.current = false;
+          onGameOverRef.current({ ...simRef.current.stats });
+        }
+      }
+      syncLoopRef.current();
+    }, [status, isBackgrounded, themeId]);
 
     // Pointer Events (Touch Drag, Mouse Drag, & Tap-to-Place)
     const getCanvasCoords = (e: React.PointerEvent<HTMLCanvasElement>) => {

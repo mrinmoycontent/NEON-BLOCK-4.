@@ -1,0 +1,13 @@
+{
+  "appId": "com.mrinmoy.neonblock",
+  "appName": "NEON BLOCK",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "backgroundColor": "#050711",
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  }
+}

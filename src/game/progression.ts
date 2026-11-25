@@ -1,5 +1,6 @@
 import { getLocalDateKey, loadDailySaveState, offsetLocalDateKey } from './daily';
 import { loadBestScore } from './engine';
+import { getStorageItem, setStorageItem } from './storage';
 import {
   AchievementDef,
   AchievementId,
@@ -528,7 +529,7 @@ export function validateAndMigrateProfile(
 
 export function loadPlayerProfile(): PlayerProfileState {
   try {
-    const rawStr = window.localStorage.getItem(PROFILE_STORAGE_KEY);
+    const rawStr = getStorageItem(PROFILE_STORAGE_KEY);
     if (!rawStr) {
       const migrated = validateAndMigrateProfile(
         null,
@@ -549,16 +550,19 @@ export function loadPlayerProfile(): PlayerProfileState {
     }
     return validated;
   } catch {
-    // Gracefully recover from corrupted JSON without crashing
-    const fallback = createDefaultProfile();
-    savePlayerProfile(fallback);
-    return fallback;
+    // Gracefully recover from corrupted JSON without clobbering recoverable legacy data
+    const recovered = validateAndMigrateProfile(
+      null,
+      loadDailySaveState(),
+      loadBestScore()
+    );
+    return recovered;
   }
 }
 
 export function savePlayerProfile(profile: PlayerProfileState): void {
   try {
-    window.localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile));
+    setStorageItem(PROFILE_STORAGE_KEY, JSON.stringify(profile));
   } catch {
     // Ignore storage quota / private mode errors
   }
